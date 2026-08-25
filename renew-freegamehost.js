@@ -15,6 +15,7 @@
  *   SERVER_ID        服务器短 ID，默认 09758a67（appa）
  *   IS_PROXY         "true" 时挂代理
  *   PROXY_SERVER     代理地址，默认 socks5://127.0.0.1:1080
+ *   SESSION_COOKIES  可选，已登录会话 cookie（Cookie header 或 Chrome 导出的 JSON），存在时优先复用会话
  *   TG_BOT_TOKEN     Telegram bot token
  *   TG_CHAT_ID       Telegram chat id
  */
@@ -28,6 +29,7 @@ const PASSWORD = process.env.PASSWORD || '';
 const SERVER_ID = (process.env.SERVER_ID || '09758a67').trim();
 const IS_PROXY = (process.env.IS_PROXY || 'false').toLowerCase() === 'true';
 const PROXY_SERVER = (process.env.PROXY_SERVER || '').trim() || 'socks5://127.0.0.1:1080';
+const SESSION_COOKIES = (process.env.SESSION_COOKIES || '').trim();
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || '';
 const TG_CHAT_ID = process.env.TG_CHAT_ID || '';
 
@@ -120,6 +122,67 @@ function formatNotification(status, extra = '', error = '') {
     if (error) lines.push(`⚠️ 错误信息: ${error}`);
     lines.push(`⏱️ 执行时间: ${nowBeijing()}`);
     return lines.join('\n');
+}
+
+function normalizeCookie(cookie) {
+    const c = { ...cookie };
+    if (c.expirationDate && !c.expires) c.expires = Math.floor(c.expirationDate);
+    delete c.expirationDate;
+    if (!c.domain && !c.url) c.url = BASE_URL;
+    if (!c.path) c.path = '/';
+    return c;
+}
+
+function parseSessionCookies(raw) {
+    if (!raw) return [];
+    const s = String(raw).trim();
+    if (!s) return [];
+
+    if (s.startsWith('[')) {
+        const parsed = JSON.parse(s);
+        if (!Array.isArray(parsed)) throw new Error('SESSION_COOKIES JSON 必须是数组');
+        return parsed
+            .filter((c) => c && c.name && typeof c.value !== 'undefined')
+            .map(normalizeCookie);
+    }
+
+    return s.split(';')
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => {
+            const idx = part.indexOf('=');
+            if (idx <= 0) return null;
+            return normalizeCookie({ name: part.slice(0, idx).trim(), value: part.slice(idx + 1).trim() });
+        })
+        .filter(Boolean);
+}
+
+async function restoreSession(page) {
+    if (!SESSION_COOKIES) return false;
+    let cookies;
+    try {
+        cookies = parseSessionCookies(SESSION_COOKIES);
+    } catch (e) {
+        log(`⚠️ SESSION_COOKIES 解析失败: ${e.message}`);
+        return false;
+    }
+    if (!cookies.length) return false;
+
+    log(`🍪 尝试注入已登录 cookie（${cookies.length} 个）`);
+    try {
+        await page.setCookie(...cookies);
+        await page.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await humanWait(2, 4);
+        if (isLoggedInUrl(page.url()) && !page.url().includes('/auth/login')) {
+            log(`✅ 已复用登录态，当前: ${page.url()}`);
+            return true;
+        }
+        log(`⚠️ 注入 cookie 后仍未登录，当前: ${page.url()}，回退账号密码登录`);
+        return false;
+    } catch (e) {
+        log(`⚠️ 注入 cookie 失败: ${e.message}`);
+        return false;
+    }
 }
 
 async function launchRealBrowser() {
@@ -781,8 +844,8 @@ async function renew(page) {
 }
 
 async function main() {
-    if (!EMAIL || !PASSWORD) {
-        log('❌ 请设置环境变量 EMAIL 和 PASSWORD');
+    if (!SESSION_COOKIES && (!EMAIL || !PASSWORD)) {
+        log('❌ 请设置 SESSION_COOKIES，或设置环境变量 EMAIL 和 PASSWORD');
         process.exit(1);
     }
     fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
@@ -809,7 +872,7 @@ async function main() {
     }
 
     try {
-        await login(page);
+        if (!(await restoreSession(page))) await login(page);
     } catch (e) {
         log(`❌ 登录失败: ${e.message}`);
         const extra = egressIp ? `🌐 出口IP: ${maskIp(egressIp)}` : '';
@@ -850,3 +913,7 @@ if (require.main === module) {
         process.exit(1);
     });
 }
+
+module.exports = {
+    parseSessionCookies,
+};
