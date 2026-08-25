@@ -176,49 +176,161 @@ async function getTurnstileToken(page) {
     }
 }
 
-async function clickConsentInContext(evaluateTarget) {
-    return await evaluateTarget.evaluate(() => {
-        const exact = ['同意', 'consent', 'accept', 'i agree', 'accept all', 'agree'];
-        const nodes = Array.from(document.querySelectorAll('button, span, a, div[role="button"]'));
-        const hit = nodes.find((el) => {
-            const t = (el.textContent || '').trim().toLowerCase();
-            if (!t) return false;
-            if (exact.includes(t)) return true;
-            return t === '同意' || t.includes('同意') && t.length < 8;
+function isVisibleBox(box) {
+    return !!(box && box.width >= 8 && box.height >= 8);
+}
+
+async function clickBox(page, box) {
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y, { steps: 6 });
+    await sleep(80);
+    await page.mouse.click(x, y);
+}
+
+async function hasBlockingOverlay(page) {
+    try {
+        return await page.evaluate(() => {
+            const sels = ['.fc-dialog', '.fc-dialog-container'];
+            const visible = (el) => {
+                const r = el.getBoundingClientRect();
+                if (r.width < 120 || r.height < 120) return false;
+                const st = window.getComputedStyle(el);
+                return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+            };
+            return sels.some((s) => Array.from(document.querySelectorAll(s)).some(visible));
         });
-        if (hit) {
-            hit.click();
-            return (hit.textContent || '').trim();
+    } catch (e) {
+        return false;
+    }
+}
+
+async function forceHideCmp(page) {
+    try {
+        return await page.evaluate(() => {
+            const sels = [
+                '.fc-consent-root',
+                '.fc-dialog-overlay',
+                '.fc-dialog-container',
+                '[class*="fc-consent"]',
+            ];
+            let count = 0;
+            for (const s of sels) {
+                document.querySelectorAll(s).forEach((el) => {
+                    el.style.setProperty('display', 'none', 'important');
+                    el.style.setProperty('pointer-events', 'none', 'important');
+                    el.setAttribute('aria-hidden', 'true');
+                    count += 1;
+                });
+            }
+            return count;
+        });
+    } catch (e) {
+        return 0;
+    }
+}
+
+async function findConsentBox(page) {
+    const selectors = [
+        'button.fc-cta-consent',
+        '.fc-button.fc-cta-consent',
+        'button[aria-label="Consent"]',
+        'button[aria-label="同意"]',
+        'button[aria-label="Accept"]',
+    ];
+    const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
+    for (const ctx of contexts) {
+        for (const sel of selectors) {
+            try {
+                const el = await ctx.$(sel);
+                if (!el) continue;
+                const box = await el.boundingBox();
+                if (!isVisibleBox(box)) continue;
+                const text = await el.evaluate((node) => (node.innerText || node.textContent || '').trim()).catch(() => sel);
+                return { box, text: text || sel, via: sel };
+            } catch (e) { /* cross-origin iframe */ }
         }
-        return '';
-    }).catch(() => '');
+    }
+
+    try {
+        const found = await page.evaluate(() => {
+            const labels = ['同意', 'consent', 'accept', 'i agree', 'accept all', 'agree', 'accept all cookies'];
+            const visible = (el) => {
+                const r = el.getBoundingClientRect();
+                if (r.width < 8 || r.height < 8) return false;
+                const st = window.getComputedStyle(el);
+                if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0) return false;
+                return true;
+            };
+            const nodes = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
+            const hit = nodes.find((el) => {
+                if (!visible(el)) return false;
+                const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().toLowerCase().replace(/\s+/g, ' ');
+                return labels.includes(t);
+            });
+            if (!hit) return null;
+            const r = hit.getBoundingClientRect();
+            return {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+                text: (hit.innerText || hit.getAttribute('aria-label') || '').trim(),
+            };
+        });
+        if (found && isVisibleBox(found)) {
+            return { box: found, text: found.text, via: 'visible-text' };
+        }
+    } catch (e) { /* ignore */ }
+    return null;
 }
 
 async function dismissOverlays(page) {
-    const clicked = await clickConsentInContext(page);
-    if (clicked) {
-        log(`👍 已点 cookie 弹窗: ${clicked}`);
-        await sleep(800);
+    const target = await findConsentBox(page);
+    if (!target) return false;
+    try {
+        await clickBox(page, target.box);
+        log(`👍 已点 cookie 弹窗: ${target.text || 'Consent'} (${target.via})`);
+        await sleep(1000);
         return true;
+    } catch (e) {
+        log(`⚠️ 点击 cookie 弹窗失败: ${e.message}`);
+        return false;
     }
-    for (const frame of page.frames()) {
-        if (frame === page.mainFrame()) continue;
-        const t = await clickConsentInContext(frame);
-        if (t) {
-            log(`👍 已在 iframe 点 cookie 弹窗: ${t}`);
-            await sleep(800);
-            return true;
-        }
-    }
-    return false;
 }
 
-async function waitDismissOverlays(page, timeoutS = 12) {
-    for (let i = 0; i < timeoutS; i++) {
-        if (await dismissOverlays(page)) return true;
-        await sleep(1000);
+async function waitDismissOverlays(page, timeoutS = 18) {
+    const start = Date.now();
+    let clicked = false;
+    while (Date.now() - start < timeoutS * 1000) {
+        if (await dismissOverlays(page)) clicked = true;
+        const blocking = await hasBlockingOverlay(page);
+        if (!blocking && clicked) return true;
+        if (!blocking && Date.now() - start > 2500) return false;
+        await sleep(800);
     }
-    return false;
+    if (await hasBlockingOverlay(page) || await findConsentBox(page)) {
+        for (const frame of page.frames()) {
+            if (frame === page.mainFrame()) continue;
+            try {
+                const el = await frame.frameElement();
+                if (!el) continue;
+                const box = await el.boundingBox();
+                if (!isVisibleBox(box) || box.width < 280 || box.height < 240) continue;
+                await page.mouse.click(box.x + box.width * 0.72, box.y + box.height * 0.84);
+                log(`👍 已按 iframe 右下区域点击 cookie 同意 (${Math.round(box.width)}x${Math.round(box.height)})`);
+                await sleep(1200);
+                break;
+            } catch (e) { /* ignore */ }
+        }
+    }
+    if (await hasBlockingOverlay(page)) {
+        const n = await forceHideCmp(page);
+        log(`⚠️ cookie 弹窗未能点掉，已强制隐藏 ${n} 个遮罩以免挡登录`);
+        await sleep(400);
+        return true;
+    }
+    return clicked;
 }
 
 async function fillCredentials(page) {
@@ -244,9 +356,9 @@ async function fillCredentials(page) {
         if (!user || !pass) return { ok: false, reason: 'missing-fields' };
 
         const setVal = (el, value) => {
+            const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
             el.focus();
-            el.value = '';
-            el.value = value;
+            desc.set.call(el, value);
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
         };
@@ -275,11 +387,18 @@ async function diagnosePage(page) {
             const body = document.body ? document.body.innerText.replace(/\s+/g, ' ').slice(0, 400) : '';
             const cf = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], .cf-turnstile');
             const tEl = document.querySelector('[name="cf-turnstile-response"]');
+            const cmp = document.querySelector('.fc-consent-root, .fc-dialog, [class*="fc-consent"]');
+            const buttons = Array.from(document.querySelectorAll('button')).slice(0, 12).map((el) => {
+                const r = el.getBoundingClientRect();
+                return `${(el.innerText || '').trim().slice(0, 24)}[${Math.round(r.width)}x${Math.round(r.height)}]`;
+            });
             return {
                 url: location.href,
                 title: document.title,
                 hasCfIframe: !!cf,
+                hasCmp: !!cmp,
                 tokenLen: tEl && tEl.value ? tEl.value.length : 0,
+                buttons,
                 body,
             };
         });
@@ -298,34 +417,52 @@ async function login(page) {
     log('🌐 打开登录页面...');
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await humanWait(2, 4);
-    await waitDismissOverlays(page, 15);
+    await waitDismissOverlays(page, 20);
 
     if (isLoggedInUrl(page.url()) && !page.url().includes('/auth/login')) {
         log(`✅ 已有登录态，当前: ${page.url()}`);
         return page.url();
     }
 
+    if (await hasBlockingOverlay(page)) {
+        await waitDismissOverlays(page, 10);
+    }
+
     await fillCredentials(page);
-    await waitDismissOverlays(page, 5);
+    if (await hasBlockingOverlay(page)) {
+        await waitDismissOverlays(page, 8);
+        await fillCredentials(page);
+    }
     await humanWait(1, 2);
 
     log('🖱️ 点击 LOGIN...');
-    const clicked = await page.evaluate(() => {
+    const loginBox = await page.evaluate(() => {
         const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
         const b = btns.find((el) => {
-            const t = (el.textContent || el.value || '').trim().toLowerCase();
+            const t = (el.innerText || el.value || '').trim().toLowerCase();
             return t === 'login' || t === 'sign in' || t === 'log in';
         });
-        if (b) { b.click(); return true; }
-        const form = document.querySelector('form');
-        if (form) { form.submit(); return true; }
-        return false;
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
     });
-    if (!clicked) throw new Error('未找到 LOGIN 按钮');
+    if (loginBox && isVisibleBox(loginBox)) {
+        await clickBox(page, loginBox);
+    } else {
+        const clicked = await page.evaluate(() => {
+            const form = document.querySelector('form');
+            if (form) { form.submit(); return true; }
+            return false;
+        });
+        if (!clicked) throw new Error('未找到 LOGIN 按钮');
+    }
 
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 50; i++) {
         await sleep(1000);
-        if (i % 3 === 0) await dismissOverlays(page);
+        if (i % 4 === 0 && await hasBlockingOverlay(page)) {
+            await dismissOverlays(page);
+            if (await hasBlockingOverlay(page)) await forceHideCmp(page);
+        }
         const url = page.url();
         if (isLoggedInUrl(url) && !url.includes('/auth/login')) {
             log(`✅ 登录成功，已跳转: ${url}`);
@@ -333,18 +470,22 @@ async function login(page) {
         }
         const err = await page.evaluate(() => {
             const body = document.body ? document.body.innerText : '';
-            const m = body.match(/these credentials|invalid|incorrect|recaptcha|验证失败|登录失败/i);
+            const m = body.match(/these credentials do not match|invalid credentials|incorrect password|recaptcha|验证失败|登录失败/i);
             return m ? m[0] : '';
         }).catch(() => '');
-        if (err && i > 4) {
+        if (err && i > 6) {
             await screenshot(page, 'login_error.png');
             throw new Error(`登录被拒: ${err} | ${url}`);
+        }
+        if (i === 15) {
+            const token = await getTurnstileToken(page);
+            log(`⏳ 仍在登录页，Turnstile token 长度=${token ? token.length : 0}`);
         }
     }
 
     await screenshot(page, 'login_timeout.png');
     const diag = await diagnosePage(page);
-    throw new Error(`登录超时未离开登录页 | ${diag.url || ''} | ${diag.title || ''}`);
+    throw new Error(`登录超时未离开登录页 | ${JSON.stringify(diag)}`);
 }
 
 async function readRenewState(page) {
