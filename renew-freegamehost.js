@@ -132,7 +132,9 @@ function formatNotification(fields = {}, clock = nowBeijing) {
     lines.push(`🖥️ 服务器: ${SERVER_ID}`);
     if (remain) lines.push(`🕒 剩余时间: ${remain}`);
     if (cooldown) lines.push(`❄️ 冷却剩余: ${cooldown}`);
-    if (note && (!remain || !note.includes(remain))) lines.push(`📝 ${note}`);
+    if (note && (!remain || !note.includes(remain)) && !/renewed successfully/i.test(note)) {
+        lines.push(`📝 ${note}`);
+    }
     if (ip) lines.push(`🌐 出口IP: ${maskIp(ip)}`);
     if (error) {
         const err = String(error).replace(/\s+/g, ' ').trim();

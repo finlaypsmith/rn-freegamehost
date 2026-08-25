@@ -79,18 +79,26 @@ test('cooldown notification is structured and does not duplicate remain', () => 
     assert.equal((msg.match(/20:30:40/g) || []).length, 1);
 });
 
-test('success notification keeps remain once and optional note', () => {
+test('success notification keeps remain once and drops success-banner note', () => {
     const msg = formatNotification({
         status: '✅ 续期成功',
         account: 'exampleuser@example.com',
-        remain: '15:50:50',
-        note: 'Server renewed successfully!',
+        remain: '23:59:58',
+        note: 'SuccessServer renewed successfully!',
         ip: '203.0.113.7',
     }, clock);
-    assert.match(msg, /✅ 续期成功/);
-    assert.match(msg, /🕒 剩余时间: 15:50:50/);
-    assert.match(msg, /📝 Server renewed successfully!/);
-    assert.equal((msg.match(/15:50:50/g) || []).length, 1);
+    assert.equal(msg, [
+        '🎮 FreeGameHost 续期通知',
+        '',
+        '✅ 续期成功',
+        '👤 账户: ex****er@example.com',
+        '🖥️ 服务器: 09758a67',
+        '🕒 剩余时间: 23:59:58',
+        '🌐 出口IP: 203.0.***.7',
+        '⏱️ 2026-08-25 16:11:30',
+    ].join('\n'));
+    assert.doesNotMatch(msg, /📝/);
+    assert.doesNotMatch(msg, /SuccessServer/);
 });
 
 test('error notification truncates long dumps', () => {
