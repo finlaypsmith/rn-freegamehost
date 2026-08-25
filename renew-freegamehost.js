@@ -492,7 +492,67 @@ async function readLoginError(page) {
     }).catch(() => ({ alert: '', body: '' }));
 }
 
+// 诊断埋点：puppeteer-real-browser 下 page.on('request'/'response') 不触发，
+// 改为在页面里 hook fetch + XMLHttpRequest（axios 走 XHR），把登录相关请求记到 window.__net。
+// 代理(数据中心IP)环境下登录静默卡住，用这些证据判断是「没发出提交 / 提交挂起」还是「服务端拒绝」。
+let _diagAttached = false;
+async function attachLoginDiagnostics(page) {
+    if (_diagAttached) return;
+    _diagAttached = true;
+    try {
+        await page.evaluateOnNewDocument(() => {
+            window.__net = [];
+            window.__netCursor = 0;
+            const rec = (o) => { try { window.__net.push(o); if (window.__net.length > 60) window.__net.shift(); } catch (e) { /* */ } };
+            const of = window.fetch;
+            if (of) {
+                window.fetch = function (...a) {
+                    const url = (a[0] && a[0].url) || a[0];
+                    const method = (a[1] && a[1].method) || (a[0] && a[0].method) || 'GET';
+                    return of.apply(this, a).then(async (res) => {
+                        let body = ''; try { body = (await res.clone().text()).slice(0, 300); } catch (e) { /* */ }
+                        rec({ t: 'fetch', method, url: String(url), status: res.status, body });
+                        return res;
+                    }, (err) => { rec({ t: 'fetch-err', method, url: String(url), err: String(err) }); throw err; });
+                };
+            }
+            const oo = XMLHttpRequest.prototype.open;
+            const os = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function (m, u) { this.__m = m; this.__u = u; return oo.apply(this, arguments); };
+            XMLHttpRequest.prototype.send = function (...a) {
+                this.addEventListener('loadend', () => {
+                    let body = ''; try { body = String(this.responseText || '').slice(0, 300); } catch (e) { /* */ }
+                    rec({ t: 'xhr', method: this.__m, url: String(this.__u), status: this.status, body });
+                });
+                return os.apply(this, a);
+            };
+        });
+    } catch (e) {
+        log(`⚠️ 诊断埋点注入失败: ${e.message}`);
+    }
+}
+
+// 读取并打印页面里新记录的请求。all=true 时（超时诊断）打印全部已捕获请求，不过滤。
+async function dumpNet(page, tag = '', all = false) {
+    try {
+        const items = await page.evaluate((dumpAll) => {
+            const arr = window.__net || [];
+            if (dumpAll) return arr.slice(-40);
+            const from = window.__netCursor || 0;
+            window.__netCursor = arr.length;
+            return arr.slice(from);
+        }, all);
+        if (all) log(`🛰️${tag} 共捕获 ${items.length} 条请求：`);
+        for (const it of items) {
+            if (!all && !/\/auth\/login|\/api\/|recaptcha|google\.com\/recaptcha/i.test(it.url)) continue;
+            if (it.t === 'fetch-err') log(`🛰️${tag} ${it.method} ${String(it.url).slice(0, 100)} 失败: ${it.err}`);
+            else log(`🛰️${tag} ${it.status} ${it.method} ${String(it.url).slice(0, 90)} | ${(it.body || '').replace(/\s+/g, ' ').slice(0, 200)}`);
+        }
+    } catch (e) { /* ignore */ }
+}
+
 async function login(page) {
+    await attachLoginDiagnostics(page);
     log('🌐 打开登录页面...');
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await humanWait(2, 4);
@@ -529,6 +589,7 @@ async function login(page) {
     let relogins = 0;
     for (let i = 0; i < 50; i++) {
         await sleep(1000);
+        await dumpNet(page);
         const url = page.url();
         if (isLoggedInUrl(url) && !url.includes('/auth/login')) {
             log(`✅ 登录成功，已跳转: ${url}`);
@@ -577,6 +638,7 @@ async function login(page) {
     }
 
     await screenshot(page, 'login_timeout.png');
+    await dumpNet(page, '(超时)', true);
     const diag = await diagnosePage(page);
     throw new Error(`登录超时未离开登录页 | ${JSON.stringify(diag)}`);
 }
