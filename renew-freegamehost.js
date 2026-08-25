@@ -116,11 +116,29 @@ async function sendTelegram(message) {
     }
 }
 
-function formatNotification(status, extra = '', error = '') {
-    const lines = ['🎮 FreeGameHost 续期通知', '', status, `👤 登录账户: ${maskEmail(EMAIL)}`, `🖥️ 服务器: ${SERVER_ID}`];
-    if (extra) lines.push(extra);
-    if (error) lines.push(`⚠️ 错误信息: ${error}`);
-    lines.push(`⏱️ 执行时间: ${nowBeijing()}`);
+function formatNotification(fields = {}, clock = nowBeijing) {
+    const {
+        status = '',
+        account = EMAIL,
+        remain = '',
+        cooldown = '',
+        ip = '',
+        note = '',
+        error = '',
+    } = fields;
+    const lines = ['🎮 FreeGameHost 续期通知', ''];
+    if (status) lines.push(status);
+    lines.push(`👤 账户: ${maskEmail(account)}`);
+    lines.push(`🖥️ 服务器: ${SERVER_ID}`);
+    if (remain) lines.push(`🕒 剩余时间: ${remain}`);
+    if (cooldown) lines.push(`❄️ 冷却剩余: ${cooldown}`);
+    if (note && (!remain || !note.includes(remain))) lines.push(`📝 ${note}`);
+    if (ip) lines.push(`🌐 出口IP: ${maskIp(ip)}`);
+    if (error) {
+        const err = String(error).replace(/\s+/g, ' ').trim();
+        lines.push(`⚠️ ${err.length > 180 ? `${err.slice(0, 180)}…` : err}`);
+    }
+    lines.push(`⏱️ ${clock()}`);
     return lines.join('\n');
 }
 
@@ -926,6 +944,7 @@ async function renew(page) {
             status: 'cooldown',
             text: `续期冷却中（${before.cooldownTime || '未知'}），剩余 ${before.remain || '未知'}`,
             remain: before.remain,
+            cooldownTime: before.cooldownTime || '',
         };
     }
 
@@ -961,7 +980,7 @@ async function main() {
         ({ browser, page } = await launchRealBrowser());
     } catch (e) {
         log(`❌ ${e.message}`);
-        await sendTelegram(formatNotification('❌ 登录失败', '', e.message));
+        await sendTelegram(formatNotification({ status: '❌ 登录失败', error: e.message }));
         process.exit(1);
     }
 
@@ -980,31 +999,41 @@ async function main() {
         if (!(await restoreSession(page))) await login(page);
     } catch (e) {
         log(`❌ 登录失败: ${e.message}`);
-        const extra = egressIp ? `🌐 出口IP: ${maskIp(egressIp)}` : '';
-        await sendTelegram(formatNotification('❌ 登录失败', extra, e.message));
+        await sendTelegram(formatNotification({ status: '❌ 登录失败', ip: egressIp, error: e.message }));
         try { await browser.close(); } catch (x) {}
         process.exit(1);
     }
 
     try {
         const r = await renew(page);
-        const extra = [
-            r.text,
-            r.remain ? `剩余 ${r.remain}` : '',
-            egressIp ? `🌐 出口IP: ${maskIp(egressIp)}` : '',
-        ].filter(Boolean).join(' | ');
+        const payload = {
+            remain: r.remain,
+            cooldown: r.cooldownTime,
+            ip: egressIp,
+        };
         if (r.ok) {
-            await sendTelegram(formatNotification('✅ 续期成功', extra));
+            await sendTelegram(formatNotification({
+                ...payload,
+                status: '✅ 续期成功',
+                note: r.text,
+            }));
         } else if (r.status === 'cooldown') {
-            await sendTelegram(formatNotification('⏳ 续期冷却中', extra));
+            await sendTelegram(formatNotification({
+                ...payload,
+                status: '⏳ 续期冷却中',
+            }));
         } else {
-            await sendTelegram(formatNotification('❌ 续期可能失败', extra, r.text));
+            await sendTelegram(formatNotification({
+                ...payload,
+                status: '❌ 续期可能失败',
+                error: r.text,
+            }));
             process.exitCode = 1;
         }
     } catch (e) {
         log(`❌ 续期异常: ${e.message}`);
         await screenshot(page, 'renew_error.png');
-        await sendTelegram(formatNotification('❌ 续期异常', '', e.message));
+        await sendTelegram(formatNotification({ status: '❌ 续期异常', error: e.message }));
         process.exitCode = 1;
     } finally {
         try { await browser.close(); } catch (e) {}
@@ -1022,4 +1051,5 @@ if (require.main === module) {
 module.exports = {
     parseSessionCookies,
     turnstileClickPoint,
+    formatNotification,
 };

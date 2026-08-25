@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseSessionCookies, turnstileClickPoint } = require('./renew-freegamehost');
+const { parseSessionCookies, turnstileClickPoint, formatNotification } = require('./renew-freegamehost');
 
 test('parseSessionCookies parses cookie header string for puppeteer setCookie', () => {
     const cookies = parseSessionCookies('pterodactyl_session=abc%3D; XSRF-TOKEN=token; theme=dark');
@@ -53,4 +53,52 @@ test('turnstileClickPoint aims at top-left checkbox of compact 150x140 widget', 
 test('turnstileClickPoint rejects invisible boxes', () => {
     assert.equal(turnstileClickPoint(null), null);
     assert.equal(turnstileClickPoint({ x: 0, y: 0, width: 10, height: 10 }), null);
+});
+
+const clock = () => '2026-08-25 16:11:30';
+
+test('cooldown notification is structured and does not duplicate remain', () => {
+    const msg = formatNotification({
+        status: '⏳ 续期冷却中',
+        account: 'exampleuser@example.com',
+        remain: '20:30:40',
+        cooldown: '01:36:48',
+        ip: '203.0.113.7',
+    }, clock);
+    assert.equal(msg, [
+        '🎮 FreeGameHost 续期通知',
+        '',
+        '⏳ 续期冷却中',
+        '👤 账户: ex****er@example.com',
+        '🖥️ 服务器: 09758a67',
+        '🕒 剩余时间: 20:30:40',
+        '❄️ 冷却剩余: 01:36:48',
+        '🌐 出口IP: 203.0.***.7',
+        '⏱️ 2026-08-25 16:11:30',
+    ].join('\n'));
+    assert.equal((msg.match(/20:30:40/g) || []).length, 1);
+});
+
+test('success notification keeps remain once and optional note', () => {
+    const msg = formatNotification({
+        status: '✅ 续期成功',
+        account: 'exampleuser@example.com',
+        remain: '15:50:50',
+        note: 'Server renewed successfully!',
+        ip: '203.0.113.7',
+    }, clock);
+    assert.match(msg, /✅ 续期成功/);
+    assert.match(msg, /🕒 剩余时间: 15:50:50/);
+    assert.match(msg, /📝 Server renewed successfully!/);
+    assert.equal((msg.match(/15:50:50/g) || []).length, 1);
+});
+
+test('error notification truncates long dumps', () => {
+    const msg = formatNotification({
+        status: '❌ 续期异常',
+        account: 'a@b.com',
+        error: `Turnstile/续期提交超时 | ${'x'.repeat(500)}`,
+    }, clock);
+    assert.match(msg, /⚠️ /);
+    assert.ok(msg.length < 400);
 });
