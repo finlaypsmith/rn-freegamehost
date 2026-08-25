@@ -285,7 +285,39 @@ async function findConsentBox(page) {
     return null;
 }
 
+// 直接在主文档 / 各 frame 里对「同意」按钮做原生 click，绕过坐标点击被遮罩拦截的问题
+async function clickConsentNative(page) {
+    const contexts = [page.mainFrame(), ...page.frames().filter((f) => f !== page.mainFrame())];
+    for (const ctx of contexts) {
+        try {
+            const hit = await ctx.evaluate(() => {
+                const labels = ['同意', 'consent', 'accept', 'i agree', 'accept all', 'agree', 'accept all cookies'];
+                let btn = document.querySelector('button.fc-cta-consent, .fc-button.fc-cta-consent, button[aria-label="Consent"], button[aria-label="同意"], button[aria-label="Accept"]');
+                if (!btn) {
+                    const nodes = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
+                    btn = nodes.find((el) => {
+                        const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().toLowerCase().replace(/\s+/g, ' ');
+                        return labels.includes(t);
+                    });
+                }
+                if (!btn) return '';
+                btn.click();
+                return (btn.innerText || btn.getAttribute('aria-label') || 'Consent').trim();
+            });
+            if (hit) return hit;
+        } catch (e) { /* cross-origin iframe，忽略 */ }
+    }
+    return '';
+}
+
 async function dismissOverlays(page) {
+    // 优先原生 click（不受遮罩层级 / OOPIF 坐标影响），失败再退回鼠标坐标点击
+    const nativeText = await clickConsentNative(page);
+    if (nativeText) {
+        log(`👍 已点 cookie 弹窗: ${nativeText} (native)`);
+        await sleep(1000);
+        return true;
+    }
     const target = await findConsentBox(page);
     if (!target) return false;
     try {
@@ -413,6 +445,29 @@ function isLoggedInUrl(url) {
     return url.startsWith(BASE_URL);
 }
 
+// 点击 LOGIN 按钮；找不到按钮时回退到 form.submit()。返回是否触发了提交。
+async function clickLoginButton(page) {
+    const loginBox = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
+        const b = btns.find((el) => {
+            const t = (el.innerText || el.value || '').trim().toLowerCase();
+            return t === 'login' || t === 'sign in' || t === 'log in';
+        });
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+    });
+    if (loginBox && isVisibleBox(loginBox)) {
+        await clickBox(page, loginBox);
+        return true;
+    }
+    return await page.evaluate(() => {
+        const form = document.querySelector('form');
+        if (form) { form.submit(); return true; }
+        return false;
+    });
+}
+
 async function login(page) {
     log('🌐 打开登录页面...');
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -436,37 +491,34 @@ async function login(page) {
     await humanWait(1, 2);
 
     log('🖱️ 点击 LOGIN...');
-    const loginBox = await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-        const b = btns.find((el) => {
-            const t = (el.innerText || el.value || '').trim().toLowerCase();
-            return t === 'login' || t === 'sign in' || t === 'log in';
-        });
-        if (!b) return null;
-        const r = b.getBoundingClientRect();
-        return { x: r.x, y: r.y, width: r.width, height: r.height };
-    });
-    if (loginBox && isVisibleBox(loginBox)) {
-        await clickBox(page, loginBox);
-    } else {
-        const clicked = await page.evaluate(() => {
-            const form = document.querySelector('form');
-            if (form) { form.submit(); return true; }
-            return false;
-        });
-        if (!clicked) throw new Error('未找到 LOGIN 按钮');
-    }
+    if (!(await clickLoginButton(page))) throw new Error('未找到 LOGIN 按钮');
 
+    // cookie 弹窗常在点击 LOGIN 前后才迟到渲染，把首次点击「吞掉」而不提交。
+    // 因此循环里：清掉迟到的弹窗后补点 LOGIN；即使没检测到弹窗，也择机重试一次。
+    let relogins = 0;
     for (let i = 0; i < 50; i++) {
         await sleep(1000);
-        if (i % 4 === 0 && await hasBlockingOverlay(page)) {
-            await dismissOverlays(page);
-            if (await hasBlockingOverlay(page)) await forceHideCmp(page);
-        }
         const url = page.url();
         if (isLoggedInUrl(url) && !url.includes('/auth/login')) {
             log(`✅ 登录成功，已跳转: ${url}`);
             return url;
+        }
+        const overlay = (await hasBlockingOverlay(page)) || !!(await findConsentBox(page));
+        if (overlay) {
+            await dismissOverlays(page);
+            if (await hasBlockingOverlay(page)) await forceHideCmp(page);
+            if (relogins < 4) {
+                await clickLoginButton(page);
+                relogins += 1;
+                log('🖱️ 清除 cookie 弹窗后补点 LOGIN');
+            }
+            continue;
+        }
+        // 无遮罩仍停在登录页：首次点击可能被吞，隔一段时间补点一次
+        if ((i === 12 || i === 25) && relogins < 4) {
+            await clickLoginButton(page);
+            relogins += 1;
+            log('🖱️ 仍在登录页，重试点击 LOGIN');
         }
         const err = await page.evaluate(() => {
             const body = document.body ? document.body.innerText : '';
