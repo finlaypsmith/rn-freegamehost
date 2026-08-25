@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseSessionCookies, turnstileClickPoint, formatNotification, shouldClickTurnstile } = require('./renew-freegamehost');
+const { parseSessionCookies, turnstileClickPoint, formatNotification, turnstileAction } = require('./renew-freegamehost');
 
 test('parseSessionCookies parses cookie header string for puppeteer setCookie', () => {
     const cookies = parseSessionCookies('pterodactyl_session=abc%3D; XSRF-TOKEN=token; theme=dark');
@@ -55,11 +55,12 @@ test('turnstileClickPoint rejects invisible boxes', () => {
     assert.equal(turnstileClickPoint({ x: 0, y: 0, width: 10, height: 10 }), null);
 });
 
-test('shouldClickTurnstile clicks a fresh widget once then waits', () => {
-    assert.equal(shouldClickTurnstile({ hasToken: false, hasIframe: true, clicksOnThisWidget: 0 }), true);
-    assert.equal(shouldClickTurnstile({ hasToken: false, hasIframe: true, clicksOnThisWidget: 1 }), false);
-    assert.equal(shouldClickTurnstile({ hasToken: true, hasIframe: true, clicksOnThisWidget: 0 }), false);
-    assert.equal(shouldClickTurnstile({ hasToken: false, hasIframe: false, clicksOnThisWidget: 0 }), false);
+test('turnstileAction waits for auto before the first click', () => {
+    assert.equal(turnstileAction({ hasToken: true, hasIframe: true, iframeAgeS: 0, clicksOnThisWidget: 0 }), 'wait');
+    assert.equal(turnstileAction({ hasToken: false, hasIframe: false, iframeAgeS: 0, clicksOnThisWidget: 0 }), 'wait');
+    assert.equal(turnstileAction({ hasToken: false, hasIframe: true, iframeAgeS: 3, clicksOnThisWidget: 0 }), 'wait-auto');
+    assert.equal(turnstileAction({ hasToken: false, hasIframe: true, iframeAgeS: 8, clicksOnThisWidget: 0 }), 'click');
+    assert.equal(turnstileAction({ hasToken: false, hasIframe: true, iframeAgeS: 20, clicksOnThisWidget: 1 }), 'wait');
 });
 
 const clock = () => '2026-08-25 16:11:30';

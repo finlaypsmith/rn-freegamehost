@@ -212,6 +212,7 @@ async function launchRealBrowser() {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--window-size=1280,1200',
+        '--disable-blink-features=AutomationControlled',
     ];
     if (IS_PROXY) args.push(`--proxy-server=${PROXY_SERVER}`);
 
@@ -229,9 +230,9 @@ async function launchRealBrowser() {
             headless: false,
             turnstile: false,
             disableXvfb: true,
+            customConfig: chromePath ? { chromePath } : {},
             connectOption: {
                 defaultViewport: null,
-                ...(chromePath ? { executablePath: chromePath } : {}),
             },
             args,
         }));
@@ -268,9 +269,13 @@ function turnstileClickPoint(box) {
     return { x, y };
 }
 
-function shouldClickTurnstile({ hasToken, hasIframe, clicksOnThisWidget }) {
-    if (hasToken || !hasIframe) return false;
-    return clicksOnThisWidget === 0;
+const TURNSTILE_AUTO_WAIT_S = 8;
+
+function turnstileAction({ hasToken, hasIframe, iframeAgeS, clicksOnThisWidget }) {
+    if (hasToken || !hasIframe) return 'wait';
+    if (clicksOnThisWidget === 0 && iframeAgeS < TURNSTILE_AUTO_WAIT_S) return 'wait-auto';
+    if (clicksOnThisWidget === 0) return 'click';
+    return 'wait';
 }
 
 async function findTurnstileIframeBoxes(page) {
@@ -325,6 +330,9 @@ async function clickTurnstileWidgets(page) {
             await sleep(120);
             await page.mouse.click(pt.x, pt.y);
             clicked += 1;
+            if (clicked === 1) {
+                log(`🖱️ 点击坐标 ${Math.round(pt.x)},${Math.round(pt.y)} box=${Math.round(box.x)},${Math.round(box.y)} ${Math.round(box.width)}x${Math.round(box.height)}`);
+            }
         } catch (e) { /* ignore */ }
     }
     return { clicked, boxes: boxes.length, size: boxes[0] ? `${Math.round(boxes[0].width)}x${Math.round(boxes[0].height)}` : '' };
@@ -864,6 +872,8 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
     let widgetWaitStart = 0;
     let retried = 0;
     let loggedToken = false;
+    let iframeSeenAt = null;
+    let loggedWaitAuto = false;
 
     for (let i = 0; i < timeoutS; i++) {
         await sleep(1000);
@@ -899,12 +909,28 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
 
         const token = await getTurnstileToken(page);
         const cfUrls = cfFrameUrls(page);
-        if (shouldClickTurnstile({ hasToken: !!token, hasIframe: cfUrls.length > 0, clicksOnThisWidget })) {
+        if (cfUrls.length && iframeSeenAt == null) iframeSeenAt = i;
+        if (!cfUrls.length) {
+            iframeSeenAt = null;
+            loggedWaitAuto = false;
+        }
+        const iframeAgeS = iframeSeenAt == null ? 0 : i - iframeSeenAt;
+        const action = turnstileAction({
+            hasToken: !!token,
+            hasIframe: cfUrls.length > 0,
+            iframeAgeS,
+            clicksOnThisWidget,
+        });
+        if (action === 'wait-auto' && !loggedWaitAuto) {
+            loggedWaitAuto = true;
+            log(`⏳ 先等 Turnstile auto（${TURNSTILE_AUTO_WAIT_S}s）: ${cfUrls[0].slice(0, 160)}`);
+        }
+        if (action === 'click') {
             const hit = await clickTurnstileWidgets(page);
             if (hit.clicked) {
                 clicksOnThisWidget += 1;
                 widgetWaitStart = i;
-                log(`🖱️ 已点 Turnstile compact 控件 ${hit.size || ''}（随后等待求解，不再连点）`);
+                log(`🖱️ 已点 Turnstile compact 控件 ${hit.size || ''}（auto 未出 token，点一次后等待）`);
             }
         } else if (token && !loggedToken) {
             loggedToken = true;
@@ -912,7 +938,7 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
         }
 
         if (i === 8 || i === 20 || i === 40) {
-            log(`⏳ Turnstile 仍在求解中... cfFrames=${cfUrls.length} tokenLen=${token ? token.length : 0} clicks=${clicksOnThisWidget}`);
+            log(`⏳ Turnstile 仍在求解中... action=${action} cfFrames=${cfUrls.length} tokenLen=${token ? token.length : 0} clicks=${clicksOnThisWidget} age=${iframeAgeS}s`);
         }
         if (clicksOnThisWidget >= 1 && i - widgetWaitStart >= 22 && !token && retried < 2) {
             log('⚠️ 点击后仍无 token，取消后重开弹窗...');
@@ -925,6 +951,8 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
             await sleep(1200);
             await clickRenew(page);
             clicksOnThisWidget = 0;
+            iframeSeenAt = null;
+            loggedWaitAuto = false;
             retried += 1;
         } else if (!cfUrls.length && (i === 14 || i === 32) && retried < 2) {
             log('⚠️ 未出现 Turnstile iframe，取消后重试点击 RENEW...');
@@ -937,6 +965,8 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
             await sleep(1200);
             await clickRenew(page);
             clicksOnThisWidget = 0;
+            iframeSeenAt = null;
+            loggedWaitAuto = false;
             retried += 1;
         }
         if (st.failedLoad && i > 12 && i % 15 === 0) {
@@ -950,6 +980,8 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
             await sleep(1500);
             await clickRenew(page);
             clicksOnThisWidget = 0;
+            iframeSeenAt = null;
+            loggedWaitAuto = false;
         }
     }
 
@@ -1077,6 +1109,6 @@ if (require.main === module) {
 module.exports = {
     parseSessionCookies,
     turnstileClickPoint,
-    shouldClickTurnstile,
+    turnstileAction,
     formatNotification,
 };
