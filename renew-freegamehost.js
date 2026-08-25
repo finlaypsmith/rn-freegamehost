@@ -468,6 +468,30 @@ async function clickLoginButton(page) {
     });
 }
 
+// 登录表单用的是 reCAPTCHA v3（invisible）。点 LOGIN 会触发 grecaptcha.execute，
+// 若实例尚未 render 就点，站点会报 "This recaptcha instance did not render yet."。
+// 这里等 grecaptcha API 就绪 + 缓冲，尽量保证点击时实例已渲染。
+async function waitRecaptchaReady(page, timeoutS = 25) {
+    const ok = await page
+        .waitForFunction(() => !!(window.grecaptcha && typeof window.grecaptcha.execute === 'function'), { timeout: timeoutS * 1000 })
+        .then(() => true)
+        .catch(() => false);
+    await sleep(1800); // 给 React 把 recaptcha 实例 render 完留缓冲
+    return ok;
+}
+
+// 读取登录页的报错提示，区分「凭证错误(致命)」与「recaptcha 未渲染(可重试)」
+async function readLoginError(page) {
+    return await page.evaluate(() => {
+        const alert = Array.from(document.querySelectorAll('[role="alert"], .alert, [class*="flash"], [class*="Flash"]'))
+            .map((e) => (e.textContent || '').trim().replace(/\s+/g, ' '))
+            .filter(Boolean)
+            .join(' | ');
+        const body = document.body ? document.body.innerText.replace(/\s+/g, ' ') : '';
+        return { alert, body };
+    }).catch(() => ({ alert: '', body: '' }));
+}
+
 async function login(page) {
     log('🌐 打开登录页面...');
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -490,11 +514,18 @@ async function login(page) {
     }
     await humanWait(1, 2);
 
+    // 先尽量把 cookie 弹窗点掉，再等 reCAPTCHA 实例渲染，最后才点 LOGIN
+    await clickConsentNative(page);
+    const rcReady = await waitRecaptchaReady(page, 25);
+    log(`🔐 reCAPTCHA ${rcReady ? '已就绪' : '未确认就绪（仍会尝试并在报错后重试）'}`);
+
     log('🖱️ 点击 LOGIN...');
     if (!(await clickLoginButton(page))) throw new Error('未找到 LOGIN 按钮');
 
-    // cookie 弹窗常在点击 LOGIN 前后才迟到渲染，把首次点击「吞掉」而不提交。
-    // 因此循环里：清掉迟到的弹窗后补点 LOGIN；即使没检测到弹窗，也择机重试一次。
+    // cookie 弹窗（Google Funding Choices）经代理时常迟到几秒~十几秒才渲染，
+    // 会把点击 LOGIN 「吞掉」而不提交。实测：主文档里对 .fc-cta-consent 原生 .click()
+    // 能可靠关闭整个弹窗。所以每轮都无条件尝试点「同意」，点掉后补点 LOGIN。
+    // 另外 reCAPTCHA 未渲染时点 LOGIN 会报 "did not render yet"，此为可重试错误。
     let relogins = 0;
     for (let i = 0; i < 50; i++) {
         await sleep(1000);
@@ -503,33 +534,43 @@ async function login(page) {
             log(`✅ 登录成功，已跳转: ${url}`);
             return url;
         }
-        const overlay = (await hasBlockingOverlay(page)) || !!(await findConsentBox(page));
-        if (overlay) {
-            await dismissOverlays(page);
-            if (await hasBlockingOverlay(page)) await forceHideCmp(page);
-            if (relogins < 4) {
+        const consentText = await clickConsentNative(page);
+        if (consentText) {
+            log(`👍 已点 cookie 弹窗: ${consentText} (native)`);
+            await sleep(600);
+            if (relogins < 6) {
+                await waitRecaptchaReady(page, 8);
                 await clickLoginButton(page);
                 relogins += 1;
-                log('🖱️ 清除 cookie 弹窗后补点 LOGIN');
+                log('🖱️ 关闭 cookie 弹窗后补点 LOGIN');
             }
             continue;
         }
-        // 无遮罩仍停在登录页：首次点击可能被吞，隔一段时间补点一次
-        if ((i === 12 || i === 25) && relogins < 4) {
+
+        const { alert, body } = await readLoginError(page);
+        const text = alert || body;
+        // 凭证类错误：致命，直接抛出
+        if (/these credentials do not match|invalid credentials|incorrect password/i.test(text) && i > 3) {
+            await screenshot(page, 'login_error.png');
+            throw new Error(`登录被拒（凭证错误）: ${(alert || text).slice(0, 120)} | ${url}`);
+        }
+        // reCAPTCHA 未渲染：可重试，等它渲染后重点 LOGIN
+        if (/recaptcha.*(did not render|not.*render|render yet)|did not render yet/i.test(text)) {
+            if (relogins < 6) {
+                await waitRecaptchaReady(page, 12);
+                await clickLoginButton(page);
+                relogins += 1;
+                log('🔁 reCAPTCHA 未就绪报错，等待渲染后重试 LOGIN');
+            }
+            continue;
+        }
+        // 仍停在登录页且无明显报错：首次点击可能被吞，择机补点
+        if ((i === 15 || i === 30) && relogins < 6) {
             await clickLoginButton(page);
             relogins += 1;
             log('🖱️ 仍在登录页，重试点击 LOGIN');
         }
-        const err = await page.evaluate(() => {
-            const body = document.body ? document.body.innerText : '';
-            const m = body.match(/these credentials do not match|invalid credentials|incorrect password|recaptcha|验证失败|登录失败/i);
-            return m ? m[0] : '';
-        }).catch(() => '');
-        if (err && i > 6) {
-            await screenshot(page, 'login_error.png');
-            throw new Error(`登录被拒: ${err} | ${url}`);
-        }
-        if (i === 15) {
+        if (i === 20) {
             const token = await getTurnstileToken(page);
             log(`⏳ 仍在登录页，Turnstile token 长度=${token ? token.length : 0}`);
         }
