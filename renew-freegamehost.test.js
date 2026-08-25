@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseSessionCookies, turnstileClickPoint, formatNotification, turnstileAction } = require('./renew-freegamehost');
+const { parseSessionCookies, turnstileClickPoint, formatNotification, turnstileAction, isClickInViewport } = require('./renew-freegamehost');
 
 test('parseSessionCookies parses cookie header string for puppeteer setCookie', () => {
     const cookies = parseSessionCookies('pterodactyl_session=abc%3D; XSRF-TOKEN=token; theme=dark');
@@ -53,6 +53,12 @@ test('turnstileClickPoint aims at top-left checkbox of compact 150x140 widget', 
 test('turnstileClickPoint rejects invisible boxes', () => {
     assert.equal(turnstileClickPoint(null), null);
     assert.equal(turnstileClickPoint({ x: 0, y: 0, width: 10, height: 10 }), null);
+});
+
+test('isClickInViewport rejects the CI miss at y=1202 in 1280x1200', () => {
+    assert.equal(isClickInViewport({ x: 958, y: 1202 }, { width: 1280, height: 1200 }), false);
+    assert.equal(isClickInViewport({ x: 958, y: 800 }, { width: 1280, height: 1200 }), true);
+    assert.equal(isClickInViewport({ x: -1, y: 100 }, { width: 1280, height: 1200 }), false);
 });
 
 test('turnstileAction waits for auto before the first click', () => {

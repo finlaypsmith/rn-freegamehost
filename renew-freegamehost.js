@@ -211,7 +211,7 @@ async function launchRealBrowser() {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--window-size=1280,1200',
+        '--window-size=1280,1600',
         '--disable-blink-features=AutomationControlled',
     ];
     if (IS_PROXY) args.push(`--proxy-server=${PROXY_SERVER}`);
@@ -239,7 +239,7 @@ async function launchRealBrowser() {
     } catch (e) {
         throw new Error(`浏览器启动失败: ${e.message}`);
     }
-    await page.setViewport({ width: 1280, height: 1200 });
+    await page.setViewport({ width: 1280, height: 1600 });
     return { browser, page };
 }
 
@@ -267,6 +267,11 @@ function turnstileClickPoint(box) {
     const x = box.x + Math.min(28, Math.max(12, box.width * 0.18));
     const y = box.height >= 100 ? box.y + 30 : box.y + box.height / 2;
     return { x, y };
+}
+
+function isClickInViewport(pt, viewport) {
+    if (!pt || !viewport) return false;
+    return pt.x >= 0 && pt.y >= 0 && pt.x < viewport.width && pt.y < viewport.height;
 }
 
 const TURNSTILE_AUTO_WAIT_S = 8;
@@ -315,7 +320,35 @@ async function findTurnstileIframeBoxes(page) {
     return boxes;
 }
 
+async function scrollTurnstileIntoView(page) {
+    try {
+        await page.evaluate(() => {
+            const walk = (root) => {
+                for (const el of root.querySelectorAll('iframe')) {
+                    if (/challenges\.cloudflare\.com|turnstile/i.test(el.src || '')) {
+                        el.scrollIntoView({ block: 'center', inline: 'center' });
+                    }
+                }
+                for (const el of root.querySelectorAll('*')) {
+                    if (el.shadowRoot) walk(el.shadowRoot);
+                }
+            };
+            walk(document);
+        });
+    } catch (e) { /* ignore */ }
+    for (const frame of page.frames()) {
+        if (!/challenges\.cloudflare\.com/i.test(frame.url() || '')) continue;
+        try {
+            const el = await frame.frameElement();
+            if (el) await el.evaluate((node) => node.scrollIntoView({ block: 'center', inline: 'center' }));
+        } catch (e) { /* ignore */ }
+    }
+    await sleep(400);
+}
+
 async function clickTurnstileWidgets(page) {
+    await scrollTurnstileIntoView(page);
+    const viewport = page.viewport() || { width: 1280, height: 1600 };
     const boxes = await findTurnstileIframeBoxes(page);
     const seen = new Set();
     let clicked = 0;
@@ -325,6 +358,10 @@ async function clickTurnstileWidgets(page) {
         seen.add(key);
         const pt = turnstileClickPoint(box);
         if (!pt) continue;
+        if (!isClickInViewport(pt, viewport)) {
+            log(`⚠️ Turnstile 点击点在视口外 ${Math.round(pt.x)},${Math.round(pt.y)} viewport=${viewport.width}x${viewport.height}，跳过`);
+            continue;
+        }
         try {
             await page.mouse.move(pt.x, pt.y, { steps: 8 });
             await sleep(120);
@@ -1110,5 +1147,6 @@ module.exports = {
     parseSessionCookies,
     turnstileClickPoint,
     turnstileAction,
+    isClickInViewport,
     formatNotification,
 };
