@@ -239,6 +239,76 @@ async function getTurnstileToken(page) {
     }
 }
 
+// 站点续期用的是 compact（约 150x140）+ auto，不是 puppeteer-real-browser 默认点的 300x65 勾选框。
+// 勾选框在左侧；compact 偏顶部，normal 垂直居中。
+function turnstileClickPoint(box) {
+    if (!box || box.width < 20 || box.height < 20) return null;
+    const x = box.x + Math.min(28, Math.max(12, box.width * 0.18));
+    const y = box.height >= 100 ? box.y + 30 : box.y + box.height / 2;
+    return { x, y };
+}
+
+async function findTurnstileIframeBoxes(page) {
+    const boxes = [];
+    for (const frame of page.frames()) {
+        if (!/challenges\.cloudflare\.com/i.test(frame.url() || '')) continue;
+        try {
+            const el = await frame.frameElement();
+            if (!el) continue;
+            const box = await el.boundingBox();
+            if (box && box.width >= 20 && box.height >= 20) {
+                boxes.push({ x: box.x, y: box.y, width: box.width, height: box.height, via: 'frame' });
+            }
+        } catch (e) { /* cross-origin / detached */ }
+    }
+    try {
+        const extra = await page.evaluate(() => {
+            const out = [];
+            const walk = (root) => {
+                for (const el of root.querySelectorAll('iframe')) {
+                    const src = el.src || '';
+                    if (!/challenges\.cloudflare\.com|turnstile/i.test(src)) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width >= 20 && r.height >= 20) {
+                        out.push({ x: r.x, y: r.y, width: r.width, height: r.height, via: 'dom' });
+                    }
+                }
+                for (const el of root.querySelectorAll('*')) {
+                    if (el.shadowRoot) walk(el.shadowRoot);
+                }
+            };
+            walk(document);
+            return out;
+        });
+        for (const b of extra) boxes.push(b);
+    } catch (e) { /* ignore */ }
+    return boxes;
+}
+
+async function clickTurnstileWidgets(page) {
+    const boxes = await findTurnstileIframeBoxes(page);
+    const seen = new Set();
+    let clicked = 0;
+    for (const box of boxes) {
+        const key = `${Math.round(box.x)},${Math.round(box.y)},${Math.round(box.width)}x${Math.round(box.height)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const pt = turnstileClickPoint(box);
+        if (!pt) continue;
+        try {
+            await page.mouse.click(pt.x, pt.y);
+            clicked += 1;
+        } catch (e) { /* ignore */ }
+    }
+    return { clicked, boxes: boxes.length, size: boxes[0] ? `${Math.round(boxes[0].width)}x${Math.round(boxes[0].height)}` : '' };
+}
+
+function cfFrameUrls(page) {
+    return page.frames()
+        .map((f) => f.url() || '')
+        .filter((u) => /challenges\.cloudflare\.com/i.test(u));
+}
+
 function isVisibleBox(box) {
     return !!(box && box.width >= 8 && box.height >= 8);
 }
@@ -491,6 +561,7 @@ async function diagnosePage(page) {
                 url: location.href,
                 title: document.title,
                 hasCfIframe: !!cf,
+                hasTurnstileApi: !!(window.turnstile),
                 hasCmp: !!cmp,
                 tokenLen: tEl && tEl.value ? tEl.value.length : 0,
                 buttons,
@@ -759,9 +830,11 @@ async function clickRenew(page) {
 }
 
 async function waitTurnstileSolved(page, timeoutS = 75) {
-    log('📡 等待 puppeteer-real-browser 自动求解 Turnstile 并提交续期...');
+    log('📡 等待 Turnstile（compact/auto）求解并提交续期...');
     const before = await readRenewState(page);
     const beforeSec = timeToSeconds(before.remain);
+    let lastClickLog = -999;
+    let retried = 0;
 
     for (let i = 0; i < timeoutS; i++) {
         await sleep(1000);
@@ -789,9 +862,40 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
                 remain: st.remain,
             };
         }
+
+        // cookie 弹窗会盖住 compact 控件，先清掉再点
+        if (await hasBlockingOverlay(page) || await findConsentBox(page)) {
+            await clickConsentNative(page);
+            if (await hasBlockingOverlay(page)) await forceHideCmp(page);
+        }
+
         const token = await getTurnstileToken(page);
-        if (token && i === 8) log(`✅ Turnstile token 已就绪（长度 ${token.length}），等待站点自动提交...`);
-        if (i === 20) log('⏳ Turnstile 仍在求解中...');
+        if (!token && i % 2 === 0) {
+            const hit = await clickTurnstileWidgets(page);
+            if (hit.clicked && i - lastClickLog >= 8) {
+                log(`🖱️ 已点 Turnstile compact 控件 ${hit.size || ''}（${hit.clicked}/${hit.boxes}）`);
+                lastClickLog = i;
+            }
+        } else if (token && i === 8) {
+            log(`✅ Turnstile token 已就绪（长度 ${token.length}），等待站点自动提交...`);
+        }
+
+        const cfUrls = cfFrameUrls(page);
+        if (i === 8 || i === 20 || i === 40) {
+            log(`⏳ Turnstile 仍在求解中... cfFrames=${cfUrls.length} tokenLen=${token ? token.length : 0} cancel=${st.security || st.failedLoad ? 'yes' : '?'}`);
+        }
+        if (!cfUrls.length && (i === 14 || i === 32) && retried < 3) {
+            log('⚠️ 未出现 Turnstile iframe，取消后重试点击 RENEW...');
+            await page.evaluate(() => {
+                const cancel = Array.from(document.querySelectorAll('button')).find((el) =>
+                    (el.textContent || '').trim().toLowerCase() === 'cancel'
+                );
+                if (cancel) cancel.click();
+            });
+            await sleep(1200);
+            await clickRenew(page);
+            retried += 1;
+        }
         if (st.failedLoad && i > 12 && i % 15 === 0) {
             log('⚠️ Turnstile 加载失败，取消后重试点击 RENEW...');
             await page.evaluate(() => {
@@ -807,6 +911,7 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
 
     await screenshot(page, 'turnstile_timeout.png');
     const diag = await diagnosePage(page);
+    diag.cfFrames = cfFrameUrls(page).map((u) => u.slice(0, 100));
     throw new Error(`Turnstile/续期提交超时 | ${JSON.stringify(diag)}`);
 }
 
@@ -916,4 +1021,5 @@ if (require.main === module) {
 
 module.exports = {
     parseSessionCookies,
+    turnstileClickPoint,
 };
