@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+process.env.SERVER_ID = 'testsrv1';
 const { parseSessionCookies, turnstileClickPoint, formatNotification, turnstileAction, isClickInViewport } = require('./renew-freegamehost');
 
 test('parseSessionCookies parses cookie header string for puppeteer setCookie', () => {
@@ -84,7 +85,7 @@ test('cooldown notification is structured and does not duplicate remain', () => 
         '',
         '⏳ 续期冷却中',
         '👤 账户: ex****er@example.com',
-        '🖥️ 服务器: 09758a67',
+        '🖥️ 服务器: testsrv1',
         '🕒 剩余时间: 20:30:40',
         '❄️ 冷却剩余: 01:36:48',
         '🌐 出口IP: 203.0.***.7',
@@ -106,7 +107,7 @@ test('success notification keeps remain once and drops success-banner note', () 
         '',
         '✅ 续期成功',
         '👤 账户: ex****er@example.com',
-        '🖥️ 服务器: 09758a67',
+        '🖥️ 服务器: testsrv1',
         '🕒 剩余时间: 23:59:58',
         '🌐 出口IP: 203.0.***.7',
         '⏱️ 2026-08-25 16:11:30',
