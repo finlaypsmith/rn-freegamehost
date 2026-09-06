@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 process.env.SERVER_ID = 'testsrv1';
-const { parseSessionCookies, turnstileClickPoint, formatNotification, turnstileAction, isClickInViewport } = require('./renew-freegamehost');
+const { parseSessionCookies, turnstileClickPoint, formatNotification, turnstileAction, isClickInViewport, isRenewButtonText } = require('./renew-freegamehost');
 
 test('parseSessionCookies parses cookie header string for puppeteer setCookie', () => {
     const cookies = parseSessionCookies('pterodactyl_session=abc%3D; XSRF-TOKEN=token; theme=dark');
@@ -68,6 +68,12 @@ test('turnstileAction waits for auto before the first click', () => {
     assert.equal(turnstileAction({ hasToken: false, hasIframe: true, iframeAgeS: 3, clicksOnThisWidget: 0 }), 'wait-auto');
     assert.equal(turnstileAction({ hasToken: false, hasIframe: true, iframeAgeS: 8, clicksOnThisWidget: 0 }), 'click');
     assert.equal(turnstileAction({ hasToken: false, hasIframe: true, iframeAgeS: 20, clicksOnThisWidget: 1 }), 'wait');
+});
+
+test('isRenewButtonText accepts the new EXTEND SERVER wording and old RENEW wording', () => {
+    assert.equal(isRenewButtonText('EXTEND SERVER +8 HOURS'), true);
+    assert.equal(isRenewButtonText('RENEW +8 HOURS'), true);
+    assert.equal(isRenewButtonText('GO PREMIUM - UNLOCK MORE POWER'), false);
 });
 
 const clock = () => '2026-08-25 16:11:30';

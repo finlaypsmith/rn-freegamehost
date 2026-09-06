@@ -849,6 +849,10 @@ async function login(page) {
     throw new Error(`登录超时未离开登录页 | ${JSON.stringify(diag)}`);
 }
 
+function isRenewButtonText(text) {
+    return /(?:RENEW|EXTEND SERVER)\s*\+8\s*HOURS/i.test(String(text || '').replace(/\s+/g, ' '));
+}
+
 async function readRenewState(page) {
     return await page.evaluate(() => {
         const body = document.body ? document.body.innerText : '';
@@ -861,7 +865,9 @@ async function readRenewState(page) {
         const failedLoad = /failed to load\. try again/i.test(body);
         const security = /complete security check to renew/i.test(body);
         const renewBtn = Array.from(document.querySelectorAll('button')).some((el) =>
-            /RENEW \+8 HOURS/i.test((el.textContent || '').replace(/\s+/g, ' '))
+            window.__isRenewButtonText
+                ? window.__isRenewButtonText(el.textContent)
+                : /(?:RENEW|EXTEND SERVER)\s*\+8\s*HOURS/i.test((el.textContent || '').replace(/\s+/g, ' '))
         );
         const flash = Array.from(document.querySelectorAll('[role="alert"], .alert, .Toastify')).map((el) =>
             (el.textContent || '').trim().replace(/\s+/g, ' ')
@@ -887,17 +893,18 @@ async function openServer(page) {
 }
 
 async function clickRenew(page) {
-    log('🖱️ 点击 RENEW +8 HOURS...');
+    log('🖱️ 点击续期按钮...');
     const ok = await page.evaluate(() => {
+        const isRenew = (text) => /(?:RENEW|EXTEND SERVER)\s*\+8\s*HOURS/i.test(String(text || '').replace(/\s+/g, ' '));
         const btns = Array.from(document.querySelectorAll('button'));
-        const b = btns.find((el) => /RENEW \+8 HOURS/i.test((el.textContent || '').replace(/\s+/g, ' ')));
+        const b = btns.find((el) => isRenew(el.textContent));
         if (!b || b.disabled) return false;
         b.click();
         return true;
     });
     if (!ok) {
         await screenshot(page, 'no_renew_button.png');
-        throw new Error('未找到可点击的 RENEW +8 HOURS 按钮（可能在冷却中）');
+        throw new Error('未找到可点击的续期按钮（RENEW/EXTEND SERVER +8 HOURS，可能在冷却中）');
     }
 }
 
@@ -1148,5 +1155,6 @@ module.exports = {
     turnstileClickPoint,
     turnstileAction,
     isClickInViewport,
+    isRenewButtonText,
     formatNotification,
 };
