@@ -787,6 +787,75 @@ async function dumpNet(page, tag = '', all = false) {
     } catch (e) { /* ignore */ }
 }
 
+// 站点组件把 Turnstile 的 errorCode 吞了，UI 上只剩一句 "Failed to load. Try again."，
+// 分不清是网络失败、出口 IP 被拒还是 Cloudflare 服务端错误。
+// turnstile/v0/api.js 是点 RENEW 时才动态插进来的，所以轮询等 window.turnstile 出现后
+// 把 render 包一层，记下 render 参数以及 callback / error-callback 的实参。
+let _tsDiagAttached = false;
+async function attachTurnstileDiagnostics(page) {
+    if (_tsDiagAttached) return;
+    _tsDiagAttached = true;
+    try {
+        await page.evaluateOnNewDocument(() => {
+            window.__tsEvents = [];
+            const rec = (o) => {
+                try {
+                    window.__tsEvents.push(o);
+                    if (window.__tsEvents.length > 40) window.__tsEvents.shift();
+                } catch (e) { /* */ }
+            };
+            let wrapped = false;
+            const tryHook = () => {
+                const ts = window.turnstile;
+                if (wrapped || !ts || typeof ts.render !== 'function') return false;
+                wrapped = true;
+                const origRender = ts.render.bind(ts);
+                ts.render = function (el, opts) {
+                    const o = Object.assign({}, opts);
+                    const cb = o.callback;
+                    const ecb = o['error-callback'];
+                    rec({ t: 'render', sitekey: o.sitekey, size: o.size, host: location.host });
+                    o.callback = (token) => {
+                        rec({ t: 'callback', tokenLen: String(token || '').length });
+                        return cb && cb(token);
+                    };
+                    o['error-callback'] = (code) => {
+                        rec({ t: 'error-callback', code: String(code) });
+                        return ecb && ecb(code);
+                    };
+                    try {
+                        return origRender(el, o);
+                    } catch (e) {
+                        rec({ t: 'render-throw', err: e.message });
+                        throw e;
+                    }
+                };
+                rec({ t: 'hooked' });
+                return true;
+            };
+            // 先立刻试一次（api.js 已就绪的情况），再按 50ms 轮询兜住动态插入的 api.js。
+            // 站点是 api.js onload 之后隔 200ms 才 render，轮询有足够余量。
+            if (!tryHook()) {
+                const timer = setInterval(() => { if (tryHook()) clearInterval(timer); }, 50);
+                setTimeout(() => clearInterval(timer), 180000);
+            }
+        });
+    } catch (e) {
+        log(`⚠️ Turnstile 诊断埋点注入失败: ${e.message}`);
+    }
+}
+
+async function dumpTurnstileEvents(page, tag = '') {
+    try {
+        const items = await page.evaluate(() => window.__tsEvents || []);
+        if (!items.length) {
+            log(`🛡️${tag} 未捕获到 Turnstile 事件（没 render，或 api.js 未被站点插入）`);
+            return;
+        }
+        for (const it of items) log(`🛡️${tag} ${JSON.stringify(it)}`);
+    } catch (e) { /* ignore */ }
+}
+
 async function login(page) {
     await attachLoginDiagnostics(page);
     log('🌐 打开登录页面...');
@@ -1067,6 +1136,7 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
     }
 
     await screenshot(page, 'turnstile_timeout.png');
+    await dumpTurnstileEvents(page, '(超时)');
     await dumpNet(page, '(超时)', true);
     const diag = await diagnosePage(page);
     diag.cfFrames = cfFrameUrls(page).map((u) => u.slice(0, 100));
@@ -1129,6 +1199,7 @@ async function main() {
     // 必须在任何 goto 之前挂上：走「复用 cookie」路径时不会经过 login()，
     // 之前只有 login() 里挂埋点，导致服务器页上的请求一条都记不到。
     await attachLoginDiagnostics(page);
+    await attachTurnstileDiagnostics(page);
 
     let egressIp = '';
     try {
