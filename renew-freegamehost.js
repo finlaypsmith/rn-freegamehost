@@ -365,10 +365,19 @@ async function clickTurnstileWidgets(page) {
         try {
             await page.mouse.move(pt.x, pt.y, { steps: 8 });
             await sleep(120);
+            // 记录点击点最顶层的元素：若被广告/同意弹窗盖住，这里会直接显示遮挡者，
+            // 而不是 Turnstile 的 iframe（跨域 iframe 在父文档里只会返回 iframe 本身）。
+            const top = await page.evaluate((c) => {
+                const el = document.elementFromPoint(c.x, c.y);
+                if (!el) return 'none';
+                const cls = typeof el.className === 'string' ? el.className.trim().split(/\s+/).slice(0, 3).join('.') : '';
+                const src = el.tagName === 'IFRAME' ? String(el.src || '').slice(0, 60) : '';
+                return `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${cls ? `.${cls}` : ''}${src ? ` src=${src}` : ''}`;
+            }, { x: pt.x, y: pt.y });
             await page.mouse.click(pt.x, pt.y);
             clicked += 1;
             if (clicked === 1) {
-                log(`🖱️ 点击坐标 ${Math.round(pt.x)},${Math.round(pt.y)} box=${Math.round(box.x)},${Math.round(box.y)} ${Math.round(box.width)}x${Math.round(box.height)}`);
+                log(`🖱️ 点击坐标 ${Math.round(pt.x)},${Math.round(pt.y)} box=${Math.round(box.x)},${Math.round(box.y)} ${Math.round(box.width)}x${Math.round(box.height)} | 顶层元素: ${top}`);
             }
         } catch (e) { /* ignore */ }
     }
@@ -379,6 +388,27 @@ function cfFrameUrls(page) {
     return page.frames()
         .map((f) => f.url() || '')
         .filter((u) => /challenges\.cloudflare\.com/i.test(u));
+}
+
+// 超时诊断用：Turnstile 的错误文案/错误码只画在 challenge iframe 内部，
+// 而站点把出错时的 widget 设成 opacity:0 隐藏了，主文档 innerText 里看不到，
+// 必须跨 frame 读才能拿到 "Error 3000xx" 这类真实原因。
+async function readCfFrameTexts(page) {
+    const out = [];
+    for (const frame of page.frames()) {
+        if (!/challenges\.cloudflare\.com/i.test(frame.url() || '')) continue;
+        const url = frame.url().slice(0, 90);
+        try {
+            const info = await frame.evaluate(() => ({
+                text: document.body ? document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 200) : '',
+                html: document.body ? document.body.innerHTML.replace(/\s+/g, ' ').slice(0, 300) : '',
+            }));
+            out.push({ url, ...info });
+        } catch (e) {
+            out.push({ url, error: e.message });
+        }
+    }
+    return out;
 }
 
 function isVisibleBox(box) {
@@ -918,11 +948,18 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
     let loggedToken = false;
     let iframeSeenAt = null;
     let loggedWaitAuto = false;
+    let failedLoadAt = null;
 
     for (let i = 0; i < timeoutS; i++) {
         await sleep(1000);
         const st = await readRenewState(page);
         const afterSec = timeToSeconds(st.remain);
+        // 站点 Turnstile 出错时会显示 "Failed to load. Try again."。记下它第一次出现的时刻，
+        // 用来区分「点击前 Cloudflare 就判失败」还是「点击动作本身把验证打失败」。
+        if (st.failedLoad && failedLoadAt === null) {
+            failedLoadAt = i;
+            log(`⚠️ 站点进入 Turnstile 错误态（error-callback）i=${i}，${clicksOnThisWidget ? `首次点击后 ${i - widgetWaitStart}s` : '尚未点击'}`);
+        }
         if (st.success || /renewed successfully/i.test(st.flash)) {
             return { ok: true, status: 'success', text: st.flash || 'Server renewed successfully!', remain: st.remain };
         }
@@ -1030,8 +1067,11 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
     }
 
     await screenshot(page, 'turnstile_timeout.png');
+    await dumpNet(page, '(超时)', true);
     const diag = await diagnosePage(page);
     diag.cfFrames = cfFrameUrls(page).map((u) => u.slice(0, 100));
+    diag.cfFrameTexts = await readCfFrameTexts(page);
+    diag.failedLoadAt = failedLoadAt;
     throw new Error(`Turnstile/续期提交超时 | ${JSON.stringify(diag)}`);
 }
 
@@ -1085,6 +1125,10 @@ async function main() {
         await sendTelegram(formatNotification({ status: '❌ 登录失败', error: e.message }));
         process.exit(1);
     }
+
+    // 必须在任何 goto 之前挂上：走「复用 cookie」路径时不会经过 login()，
+    // 之前只有 login() 里挂埋点，导致服务器页上的请求一条都记不到。
+    await attachLoginDiagnostics(page);
 
     let egressIp = '';
     try {
