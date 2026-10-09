@@ -1166,6 +1166,10 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
         if (i === 8 || i === 20 || i === 40) {
             log(`⏳ Turnstile 仍在求解中... action=${action} cfFrames=${cfUrls.length} tokenLen=${token ? token.length : 0} clicks=${clicksOnThisWidget} age=${iframeAgeS}s`);
         }
+        // 下面三种情形都靠「取消后重开弹窗」来重置 Turnstile，共用同一个 retried 配额：
+        // 彼此用 else if 串起来，所以一轮迭代最多重开一次，全程最多 2 次。
+        // 注意站点那句 "Failed to load. Try again." 其实是 Turnstile 的 error-callback，
+        // 不是脚本没加载出来——不加限制会把整个超时窗口耗在反复重开挑战上。
         if (clicksOnThisWidget >= 1 && i - widgetWaitStart >= 22 && !token && retried < 2) {
             log('⚠️ 点击后仍无 token，取消后重开弹窗...');
             await page.evaluate(() => {
@@ -1194,9 +1198,8 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
             iframeSeenAt = null;
             loggedWaitAuto = false;
             retried += 1;
-        }
-        if (st.failedLoad && i > 12 && i % 15 === 0) {
-            log('⚠️ Turnstile 加载失败，取消后重试点击 RENEW...');
+        } else if (st.failedLoad && i > 12 && i % 15 === 0 && retried < 2) {
+            log('⚠️ 站点报 Turnstile 错误（error-callback），取消后重试点击 RENEW...');
             await page.evaluate(() => {
                 const cancel = Array.from(document.querySelectorAll('button')).find((el) =>
                     (el.textContent || '').trim().toLowerCase() === 'cancel'
@@ -1208,6 +1211,7 @@ async function waitTurnstileSolved(page, timeoutS = 75) {
             clicksOnThisWidget = 0;
             iframeSeenAt = null;
             loggedWaitAuto = false;
+            retried += 1;
         }
     }
 
