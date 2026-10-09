@@ -94,7 +94,7 @@ test('cooldown notification is structured and does not duplicate remain', () => 
         '🖥️ 服务器: testsrv1',
         '🕒 剩余时间: 20:30:40',
         '❄️ 冷却剩余: 01:36:48',
-        '🌐 出口IP: 203.0.***.7',
+        '🌐 出口IP: 203.0.113.7',
         '⏱️ 2026-08-25 16:11:30',
     ].join('\n'));
     assert.equal((msg.match(/20:30:40/g) || []).length, 1);
@@ -115,7 +115,7 @@ test('success notification keeps remain once and drops success-banner note', () 
         '👤 账户: ex****er@example.com',
         '🖥️ 服务器: testsrv1',
         '🕒 剩余时间: 23:59:58',
-        '🌐 出口IP: 203.0.***.7',
+        '🌐 出口IP: 203.0.113.7',
         '⏱️ 2026-08-25 16:11:30',
     ].join('\n'));
     assert.doesNotMatch(msg, /📝/);

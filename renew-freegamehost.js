@@ -67,12 +67,6 @@ function maskEmail(email) {
     return email.length > 2 ? email.slice(0, 2) + '****' : email + '****';
 }
 
-function maskIp(ip) {
-    const p = String(ip || '').split('.');
-    if (p.length === 4) return `${p[0]}.${p[1]}.***.${p[3]}`;
-    return '未知';
-}
-
 function timeToSeconds(t) {
     if (!t) return 0;
     const m = String(t).trim().match(/(\d{1,2}):(\d{2}):(\d{2})/);
@@ -135,7 +129,7 @@ function formatNotification(fields = {}, clock = nowBeijing) {
     if (note && (!remain || !note.includes(remain)) && !/renewed successfully/i.test(note)) {
         lines.push(`📝 ${note}`);
     }
-    if (ip) lines.push(`🌐 出口IP: ${maskIp(ip)}`);
+    if (ip) lines.push(`🌐 出口IP: ${ip}`);
     if (error) {
         const err = String(error).replace(/\s+/g, ' ').trim();
         lines.push(`⚠️ ${err.length > 180 ? `${err.slice(0, 180)}…` : err}`);
@@ -346,6 +340,24 @@ async function scrollTurnstileIntoView(page) {
     await sleep(400);
 }
 
+// puppeteer-real-browser 已经在 page 上挂了 ghost-cursor（page.realCursor）。
+// 手写的 mouse.move(x, y, { steps }) 画出来的是等距完美直线，人手画不出来，属于明确的
+// 自动化特征；ghost-cursor 生成带抖动和加减速的曲线路径，并给按下/释放之间留出停顿。
+// 注意：不要用 page.realClick —— 库里是裸赋值 cursor.click，丢了 this，
+// 一调就抛 "this.toggleRandomMove is not a function"，必须走 page.realCursor。
+async function moveAndClick(page, pt) {
+    const cursor = page.realCursor;
+    if (cursor && typeof cursor.moveTo === 'function' && typeof cursor.click === 'function') {
+        await cursor.moveTo({ x: pt.x, y: pt.y });
+        await cursor.click(undefined, { hesitate: 80, waitForClick: 90 });
+        return 'ghost-cursor';
+    }
+    await page.mouse.move(pt.x, pt.y, { steps: 8 });
+    await sleep(120);
+    await page.mouse.click(pt.x, pt.y);
+    return 'mouse';
+}
+
 async function clickTurnstileWidgets(page) {
     await scrollTurnstileIntoView(page);
     const viewport = page.viewport() || { width: 1280, height: 1600 };
@@ -363,8 +375,6 @@ async function clickTurnstileWidgets(page) {
             continue;
         }
         try {
-            await page.mouse.move(pt.x, pt.y, { steps: 8 });
-            await sleep(120);
             // 记录点击点最顶层的元素：若被广告/同意弹窗盖住，这里会直接显示遮挡者，
             // 而不是 Turnstile 的 iframe（跨域 iframe 在父文档里只会返回 iframe 本身）。
             const top = await page.evaluate((c) => {
@@ -374,10 +384,10 @@ async function clickTurnstileWidgets(page) {
                 const src = el.tagName === 'IFRAME' ? String(el.src || '').slice(0, 60) : '';
                 return `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${cls ? `.${cls}` : ''}${src ? ` src=${src}` : ''}`;
             }, { x: pt.x, y: pt.y });
-            await page.mouse.click(pt.x, pt.y);
+            const via = await moveAndClick(page, pt);
             clicked += 1;
             if (clicked === 1) {
-                log(`🖱️ 点击坐标 ${Math.round(pt.x)},${Math.round(pt.y)} box=${Math.round(box.x)},${Math.round(box.y)} ${Math.round(box.width)}x${Math.round(box.height)} | 顶层元素: ${top}`);
+                log(`🖱️ 点击坐标 ${Math.round(pt.x)},${Math.round(pt.y)} box=${Math.round(box.x)},${Math.round(box.y)} ${Math.round(box.width)}x${Math.round(box.height)} | 顶层元素: ${top} | 点击方式: ${via}`);
             }
         } catch (e) { /* ignore */ }
     }
@@ -1207,7 +1217,7 @@ async function main() {
         else log('🍭 未使用代理，直连访问');
         await page.goto('https://api.ip.sb/ip', { waitUntil: 'domcontentloaded', timeout: 20000 });
         egressIp = await page.evaluate(() => (document.body.innerText || '').trim()).catch(() => '');
-        log(`📍 当前出口IP: ${maskIp(egressIp)}`);
+        log(`📍 当前出口IP: ${egressIp}`);
     } catch (e) {
         log(`⚠️ 获取出口 IP 失败: ${e.message}`);
     }
