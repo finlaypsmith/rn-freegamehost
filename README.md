@@ -86,6 +86,7 @@ npm test        # 或 node --test renew-freegamehost.test.js
 | `renew-freegamehost.js` | 主脚本：登录、续期、Turnstile、通知 |
 | `renew-freegamehost.test.js` | 纯函数单元测试（`node:test`） |
 | `.github/workflows/renew-freegamehost.yml` | 定时/手动触发的 CI 工作流 |
+| `TROUBLESHOOTING.md` | 排查记录：Turnstile `error-callback 600010` 的定位过程与根因 |
 
 ## 说明
 
