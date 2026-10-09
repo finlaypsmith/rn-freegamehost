@@ -207,11 +207,6 @@ async function launchRealBrowser() {
         '--disable-gpu',
         '--window-size=1280,1600',
         '--disable-blink-features=AutomationControlled',
-        // CI 的 ICE candidate 里冒出了 srflx 候选 57.151.137.33——那是 runner 的真实出口 IP，
-        // 而页面流量走代理是 190.5.208.24，两个对不上，Turnstile 直接判 bot（600010）。
-        // 根因是 Chrome 走 --proxy-server 时 WebRTC 默认绕过代理；本机只是因为 UDP 到 STUN
-        // 不通才侥幸没泄漏。这个策略让 WebRTC 只使用代理的 UDP，代理不支持 UDP 时不产生候选。
-        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     ];
     if (IS_PROXY) args.push(`--proxy-server=${PROXY_SERVER}`);
 
@@ -875,6 +870,27 @@ async function dumpTurnstileEvents(page, tag = '') {
 // 差别只可能在 runner 环境，所以把关键项打出来做逐项对比。
 // 其中 WebRTC 最可疑：Chrome 走 --proxy-server 时 WebRTC 默认绕过代理，
 // 本机泄漏的是家宽 IP（且实测连 srflx 都拿不到），CI 泄漏的会是数据中心 IP。
+// WebRTC 的 ICE srflx 候选会把 runner 的真实出口 IP 暴露给页面，而页面流量经代理是
+// 另一个 IP，两者互相矛盾，Turnstile 据此判 bot（error-callback 600010）。
+// 实测 --force-webrtc-ip-handling-policy=disable_non_proxied_udp 拦不住（CI 上 srflx 照旧），
+// 改为在文档创建时把 ICE 传输策略锁成 relay：没有 TURN 服务器时就完全不产生候选。
+async function blockWebRtcLeak(page) {
+    try {
+        await page.evaluateOnNewDocument(() => {
+            const Orig = window.RTCPeerConnection;
+            if (!Orig) return;
+            const Patched = class RTCPeerConnection extends Orig {
+                constructor(config, ...rest) {
+                    super({ ...(config || {}), iceTransportPolicy: 'relay' }, ...rest);
+                }
+            };
+            window.RTCPeerConnection = Patched;
+        });
+    } catch (e) {
+        log(`⚠️ WebRTC 防泄漏注入失败: ${e.message}`);
+    }
+}
+
 async function reportFingerprint(page) {
     try {
         const fp = await page.evaluate(async () => {
@@ -1260,6 +1276,7 @@ async function main() {
     // 之前只有 login() 里挂埋点，导致服务器页上的请求一条都记不到。
     await attachLoginDiagnostics(page);
     await attachTurnstileDiagnostics(page);
+    await blockWebRtcLeak(page);
 
     let egressIp = '';
     try {
