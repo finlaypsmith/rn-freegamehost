@@ -866,6 +866,51 @@ async function dumpTurnstileEvents(page, tag = '') {
     } catch (e) { /* ignore */ }
 }
 
+// Turnstile 判 bot 时会看浏览器指纹。同一出口 IP 下本机能过、CI 过不去，
+// 差别只可能在 runner 环境，所以把关键项打出来做逐项对比。
+// 其中 WebRTC 最可疑：Chrome 走 --proxy-server 时 WebRTC 默认绕过代理，
+// 本机泄漏的是家宽 IP（且实测连 srflx 都拿不到），CI 泄漏的会是数据中心 IP。
+async function reportFingerprint(page) {
+    try {
+        const fp = await page.evaluate(async () => {
+            const out = {
+                webdriver: navigator.webdriver,
+                cores: navigator.hardwareConcurrency,
+                mem: navigator.deviceMemory === undefined ? null : navigator.deviceMemory,
+                platform: navigator.platform,
+                lang: (navigator.languages || []).join(','),
+                tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                ua: navigator.userAgent,
+                screen: `${screen.width}x${screen.height} avail ${screen.availWidth}x${screen.availHeight} depth ${screen.colorDepth}`,
+                win: `${innerWidth}x${innerHeight} outer ${outerWidth}x${outerHeight} dpr ${devicePixelRatio}`,
+            };
+            try {
+                const gl = document.createElement('canvas').getContext('webgl');
+                const dbg = gl && gl.getExtension('WEBGL_debug_renderer_info');
+                out.webgl = gl ? (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) : 'unavailable';
+            } catch (e) {
+                out.webgl = `err: ${e.message}`;
+            }
+            out.webrtc = await new Promise((resolve) => {
+                const cands = [];
+                try {
+                    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+                    pc.createDataChannel('probe');
+                    pc.onicecandidate = (e) => { if (e.candidate) cands.push(e.candidate.candidate); };
+                    pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => {});
+                    setTimeout(() => { try { pc.close(); } catch (x) { /* */ } resolve(cands); }, 6000);
+                } catch (e) {
+                    resolve([`error: ${e.message}`]);
+                }
+            });
+            return out;
+        });
+        log(`🖥️ 浏览器指纹: ${JSON.stringify(fp)}`);
+    } catch (e) {
+        log(`⚠️ 指纹采集失败: ${e.message}`);
+    }
+}
+
 async function login(page) {
     await attachLoginDiagnostics(page);
     log('🌐 打开登录页面...');
@@ -1221,6 +1266,8 @@ async function main() {
     } catch (e) {
         log(`⚠️ 获取出口 IP 失败: ${e.message}`);
     }
+
+    await reportFingerprint(page);
 
     try {
         if (!(await restoreSession(page))) await login(page);
