@@ -199,6 +199,24 @@ async function restoreSession(page) {
     }
 }
 
+// 站点续期弹窗是 position:fixed + flex 居中、且没有 overflow，卡片比矮视口高时会被
+// 上下挤出可视区（Turnstile 控件就落到视口外，点不到），所以视口必须够高。
+// 但只调 Emulation 的 height 会让 window.innerHeight 超过 screen.height —— 物理上不可能，
+// 是可被直接比对的自动化特征。这里不用 page.setViewport，改用底层 CDP 把 screen 尺寸
+// 一起覆盖，保证 innerHeight ≤ screen.height。
+async function applyViewport(page, width, height) {
+    const client = await page.createCDPSession();
+    await client.send('Emulation.setDeviceMetricsOverride', {
+        width,
+        height,
+        deviceScaleFactor: 1,
+        mobile: false,
+        screenWidth: width,
+        screenHeight: height,
+    });
+    return client;
+}
+
 async function launchRealBrowser() {
     const args = [
         '--no-sandbox',
@@ -233,7 +251,7 @@ async function launchRealBrowser() {
     } catch (e) {
         throw new Error(`浏览器启动失败: ${e.message}`);
     }
-    await page.setViewport({ width: 1280, height: 1600 });
+    await applyViewport(page, 1280, 1600);
     return { browser, page };
 }
 
@@ -266,6 +284,16 @@ function turnstileClickPoint(box) {
 function isClickInViewport(pt, viewport) {
     if (!pt || !viewport) return false;
     return pt.x >= 0 && pt.y >= 0 && pt.x < viewport.width && pt.y < viewport.height;
+}
+
+// 视口尺寸从页面里读：视口是 applyViewport 用底层 CDP 设的，page.viewport() 记录的
+// 未必是最新值，而「点击点是否落在视口内」必须按真实值判断。
+async function readViewport(page) {
+    try {
+        return await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    } catch (e) {
+        return null;
+    }
 }
 
 const TURNSTILE_AUTO_WAIT_S = 8;
@@ -360,7 +388,7 @@ async function moveAndClick(page, pt) {
 
 async function clickTurnstileWidgets(page) {
     await scrollTurnstileIntoView(page);
-    const viewport = page.viewport() || { width: 1280, height: 1600 };
+    const viewport = await readViewport(page);
     const boxes = await findTurnstileIframeBoxes(page);
     const seen = new Set();
     let clicked = 0;
