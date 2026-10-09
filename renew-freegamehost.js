@@ -207,6 +207,11 @@ async function launchRealBrowser() {
         '--disable-gpu',
         '--window-size=1280,1600',
         '--disable-blink-features=AutomationControlled',
+        // CI 的 ICE candidate 里冒出了 srflx 候选 57.151.137.33——那是 runner 的真实出口 IP，
+        // 而页面流量走代理是 190.5.208.24，两个对不上，Turnstile 直接判 bot（600010）。
+        // 根因是 Chrome 走 --proxy-server 时 WebRTC 默认绕过代理；本机只是因为 UDP 到 STUN
+        // 不通才侥幸没泄漏。这个策略让 WebRTC 只使用代理的 UDP，代理不支持 UDP 时不产生候选。
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     ];
     if (IS_PROXY) args.push(`--proxy-server=${PROXY_SERVER}`);
 
