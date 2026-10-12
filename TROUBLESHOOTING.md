@@ -80,6 +80,9 @@ Cloudflare 据此判定为 bot，直接回调 `600010`。
 Chrome 走 `--proxy-server=socks5://...` 时，**WebRTC 默认绕过代理**，本机没出事纯属侥幸：
 这台机器的 UDP 到 STUN 拿不到 `srflx`，所以连候选都不产生。
 
+这是当时能确定的**唯一一处 CI 独有差异**，据此定位是合理的；但它**不等于问题的全部**，
+理由见「后续」。
+
 ### 修复
 
 在文档创建时把 ICE 传输策略锁成 `relay`，没有 TURN 服务器就完全不产生候选：
@@ -95,6 +98,45 @@ window.RTCPeerConnection = Patched;
 
 验证：指纹行里 `webrtc` 由「一条 mDNS host 候选」变为 `[]`，CI 上点击后约 1 秒
 拿到 token（长度 794）并续期成功。
+
+**但这只说明这一处差异被堵掉了，不能说明问题已根除** —— 见下一节。
+
+### 后续：间歇性并没有消失（2026-10-12）
+
+**1. 站点第三次改按钮文案。**
+
+`RENEW +8 HOURS` → `EXTEND SERVER +8 HOURS` → **`EXTEND FREE SERVER +8 HOURS`**。
+中间插了个 `FREE`，原正则 `(?:RENEW|EXTEND SERVER)` 匹配不上，表现为
+「页面上没有 RENEW +8 HOURS 按钮」——截图里按钮是亮着的、可点的，只是文案对不上。
+
+已改为 `(?:RENEW|EXTEND(?: FREE)? SERVER)\s*\+8\s*HOURS`，并把 pattern 收敛到
+`RENEW_BUTTON_PATTERN` 一处定义。原先正则散在三处（Node 端 `isRenewButtonText`
+加两处 `page.evaluate` 内联），改文案要同步改三处，漏一处就是这个报错；顺带删掉了
+从未被注入过的 `window.__isRenewButtonText` 死钩子。
+
+**2. 同样的环境，相隔 2 分钟，一次失败一次成功。**
+
+| 时间 | 环境 | 结果 |
+|---|---|---|
+| 11:30 | 本机 / 190.5.208.24 / 同代码 | ❌ `error-callback` → 超时 |
+| 11:31 | **与上一行完全相同** | ✅ auto 阶段直接出 token，15 秒续期成功 |
+
+两次之间没有改任何代码，第二次只是为了留存完整日志而重跑。
+
+**所以上面「根因」那节的结论说满了。** 准确的说法是：
+
+- WebRTC 泄漏是真实存在、CI 独有的一处差异，堵掉它有明确依据（`webrtc` 确实从
+  `srflx` 变成空数组）；
+- 但它**不是全部**，Cloudflare 对这个出口 IP 的判定本身就有波动；
+- 修复前后样本都太少（修复前 CI 连续失败，修复后也只成功过 1 次），**无法断言
+  修复把成功率提高了多少**。
+
+**3. 重跑成功靠的是「全新的浏览器进程」。**
+
+11:31 那次成功是重新起了浏览器、新页面、新 challenge。而脚本现在的重试
+（`retried < 2`）只是在**同一个浏览器 session 里重开弹窗**——修复前的 CI 连着重开
+5 次，一次都没成。照这个观察，更可能有效的是**超时后重新加载服务器页再走一轮**，
+而不是只重开弹窗。这一条还没做。
 
 ### 走过的弯路
 
@@ -118,9 +160,14 @@ window.RTCPeerConnection = Patched;
 
 ### 已知未处理
 
-- `waitTurnstileSolved` 里 `failedLoad` 那条重试分支没有 `retried` 上限，也不递增
-  `retried`，与相邻两条分支不一致；一旦触发会在 80 秒内重开 5 轮挑战。
-- `window.innerHeight`(1600) 大于 `screen.height`(1024)，物理上不可能，是可被直接比对的
-  自动化特征。本机同样存在却照样通过，所以不是决定项，但值得收拾。
-- `.github/workflows/renew-freegamehost.yml` 里的 `schedule` 目前是注释状态，只有
-  `workflow_dispatch` 手动触发。
+- **失败后的重试粒度**：`waitTurnstileSolved` 超时后直接抛错结束，现有重试都是
+  「同一个 session 里重开弹窗」，而重跑成功靠的是全新进程 / 新 challenge（见「后续」
+  第 3 点）。更可能有效的是超时后重新加载服务器页再走一轮。
+- **`failedLoad` 分支的重试配额**：已加 `retried < 2` 并串进 `else if` 链（原先既无
+  上限也不递增，80 秒内会重开 5 轮；而且它是独立 `if`，某轮可能与相邻分支同时命中，
+  一次迭代吃掉两份配额）。不过若确认「同 session 重开无效」，这个上限本身也该重新评估。
+- **`innerHeight` 与 `screen.height`**：已改用底层 CDP 把 `screenWidth`/`screenHeight`
+  一起覆盖，两者都是 1600，不再互相矛盾。本机 `outer`(1269) 仍小于 `inner`，是窗口
+  管理器把窗口约束在真实屏幕内所致；CI 的 Xvfb 没有窗口管理器，不受影响。
+- **`schedule`**：`.github/workflows/renew-freegamehost.yml` 里仍是注释状态，只有
+  `workflow_dispatch` 手动触发。建议先手动跑几次确认稳定，再恢复定时。
