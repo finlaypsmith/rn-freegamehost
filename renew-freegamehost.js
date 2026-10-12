@@ -1052,12 +1052,19 @@ async function login(page) {
     throw new Error(`登录超时未离开登录页 | ${JSON.stringify(diag)}`);
 }
 
+// 站点按钮文案已经改过两次：RENEW +8 HOURS → EXTEND SERVER +8 HOURS → EXTEND FREE SERVER +8 HOURS。
+// 只在这一处定义 pattern，页面里那两处判断经 page.evaluate 的参数传进去，
+// 免得以后改文案要同步改三处——漏一处的表现就是「页面上没有 RENEW 按钮」。
+const RENEW_BUTTON_PATTERN = '(?:RENEW|EXTEND(?: FREE)? SERVER)\\s*\\+8\\s*HOURS';
+const RENEW_BUTTON_RE = new RegExp(RENEW_BUTTON_PATTERN, 'i');
+
 function isRenewButtonText(text) {
-    return /(?:RENEW|EXTEND SERVER)\s*\+8\s*HOURS/i.test(String(text || '').replace(/\s+/g, ' '));
+    return RENEW_BUTTON_RE.test(String(text || '').replace(/\s+/g, ' '));
 }
 
 async function readRenewState(page) {
-    return await page.evaluate(() => {
+    return await page.evaluate((renewPattern) => {
+        const isRenew = (text) => new RegExp(renewPattern, 'i').test(String(text || '').replace(/\s+/g, ' '));
         const body = document.body ? document.body.innerText : '';
         const remain = (body.match(/TIME REMAINING[\s\S]{0,40}?(\d{1,2}:\d{2}:\d{2})/i) || [])[1]
             || (body.match(/(\d{2}:\d{2}:\d{2})\s*HH\s*:\s*MM\s*:\s*SS/i) || [])[1]
@@ -1067,16 +1074,12 @@ async function readRenewState(page) {
         const success = /server renewed successfully/i.test(body);
         const failedLoad = /failed to load\. try again/i.test(body);
         const security = /complete security check to renew/i.test(body);
-        const renewBtn = Array.from(document.querySelectorAll('button')).some((el) =>
-            window.__isRenewButtonText
-                ? window.__isRenewButtonText(el.textContent)
-                : /(?:RENEW|EXTEND SERVER)\s*\+8\s*HOURS/i.test((el.textContent || '').replace(/\s+/g, ' '))
-        );
+        const renewBtn = Array.from(document.querySelectorAll('button')).some((el) => isRenew(el.textContent));
         const flash = Array.from(document.querySelectorAll('[role="alert"], .alert, .Toastify')).map((el) =>
             (el.textContent || '').trim().replace(/\s+/g, ' ')
         ).filter(Boolean)[0] || '';
         return { remain, cooldown, cooldownTime, success, failedLoad, security, renewBtn, flash, url: location.href };
-    });
+    }, RENEW_BUTTON_PATTERN);
 }
 
 async function openServer(page) {
@@ -1097,17 +1100,17 @@ async function openServer(page) {
 
 async function clickRenew(page) {
     log('🖱️ 点击续期按钮...');
-    const ok = await page.evaluate(() => {
-        const isRenew = (text) => /(?:RENEW|EXTEND SERVER)\s*\+8\s*HOURS/i.test(String(text || '').replace(/\s+/g, ' '));
+    const ok = await page.evaluate((renewPattern) => {
+        const isRenew = (text) => new RegExp(renewPattern, 'i').test(String(text || '').replace(/\s+/g, ' '));
         const btns = Array.from(document.querySelectorAll('button'));
         const b = btns.find((el) => isRenew(el.textContent));
         if (!b || b.disabled) return false;
         b.click();
         return true;
-    });
+    }, RENEW_BUTTON_PATTERN);
     if (!ok) {
         await screenshot(page, 'no_renew_button.png');
-        throw new Error('未找到可点击的续期按钮（RENEW/EXTEND SERVER +8 HOURS，可能在冷却中）');
+        throw new Error('未找到可点击的续期按钮（RENEW / EXTEND [FREE] SERVER +8 HOURS，可能在冷却中）');
     }
 }
 

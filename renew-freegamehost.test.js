@@ -70,9 +70,12 @@ test('turnstileAction waits for auto before the first click', () => {
     assert.equal(turnstileAction({ hasToken: false, hasIframe: true, iframeAgeS: 20, clicksOnThisWidget: 1 }), 'wait');
 });
 
-test('isRenewButtonText accepts the new EXTEND SERVER wording and old RENEW wording', () => {
-    assert.equal(isRenewButtonText('EXTEND SERVER +8 HOURS'), true);
+test('isRenewButtonText accepts RENEW / EXTEND SERVER / EXTEND FREE SERVER wordings', () => {
     assert.equal(isRenewButtonText('RENEW +8 HOURS'), true);
+    assert.equal(isRenewButtonText('EXTEND SERVER +8 HOURS'), true);
+    assert.equal(isRenewButtonText('EXTEND FREE SERVER +8 HOURS'), true);
+    // 站点渲染出来是两个空格
+    assert.equal(isRenewButtonText('EXTEND FREE SERVER  +8 HOURS'), true);
     assert.equal(isRenewButtonText('GO PREMIUM - UNLOCK MORE POWER'), false);
 });
 
