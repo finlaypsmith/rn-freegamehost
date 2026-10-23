@@ -1052,10 +1052,10 @@ async function login(page) {
     throw new Error(`登录超时未离开登录页 | ${JSON.stringify(diag)}`);
 }
 
-// 站点按钮文案已经改过两次：RENEW +8 HOURS → EXTEND SERVER +8 HOURS → EXTEND FREE SERVER +8 HOURS。
+// 站点按钮文案已经改过两次：RENEW +12 HOURS → EXTEND SERVER +12 HOURS → EXTEND FREE SERVER +12 HOURS。
 // 只在这一处定义 pattern，页面里那两处判断经 page.evaluate 的参数传进去，
 // 免得以后改文案要同步改三处——漏一处的表现就是「页面上没有 RENEW 按钮」。
-const RENEW_BUTTON_PATTERN = '(?:RENEW|EXTEND(?: FREE)? SERVER)\\s*\\+8\\s*HOURS';
+const RENEW_BUTTON_PATTERN = '(?:RENEW|EXTEND(?: FREE)? SERVER)\\s*\\+12\\s*HOURS';
 const RENEW_BUTTON_RE = new RegExp(RENEW_BUTTON_PATTERN, 'i');
 
 function isRenewButtonText(text) {
@@ -1110,7 +1110,7 @@ async function clickRenew(page) {
     }, RENEW_BUTTON_PATTERN);
     if (!ok) {
         await screenshot(page, 'no_renew_button.png');
-        throw new Error('未找到可点击的续期按钮（RENEW / EXTEND [FREE] SERVER +8 HOURS，可能在冷却中）');
+        throw new Error('未找到可点击的续期按钮（RENEW / EXTEND [FREE] SERVER +12 HOURS，可能在冷却中）');
     }
 }
 
@@ -1273,7 +1273,7 @@ async function renew(page) {
 
     if (!before.renewBtn) {
         await screenshot(page, 'no_renew_button.png');
-        throw new Error('页面上没有 RENEW +8 HOURS 按钮');
+        throw new Error('页面上没有 RENEW +12 HOURS 按钮');
     }
 
     await clickRenew(page);
